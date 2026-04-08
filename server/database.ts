@@ -2,8 +2,14 @@ import Database from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
 import bcrypt from 'bcryptjs';
 
+import { join } from 'path';
+import { existsSync, mkdirSync } from 'fs';
+
 // Database connection
-const db = new Database('securepass.db');
+const isVercel = process.env.VERCEL === '1';
+const dbPath = isVercel ? join('/tmp', 'securepass.db') : 'securepass.db';
+
+const db = new Database(dbPath);
 
 // Enable foreign keys
 db.pragma('foreign_keys = ON');

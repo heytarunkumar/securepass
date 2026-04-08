@@ -2,24 +2,20 @@
   "version": 2,
   "buildCommand": "npm run build",
   "installCommand": "npm install",
-  "framework": null,
+  "framework": "vite",
   "outputDirectory": "dist/spa",
-  "functions": {
-    "dist/server/node-build.mjs": {
-      "runtime": "nodejs18.x"
-    }
-  },
-  "routes": [
+  "rewrites": [
     {
-      "src": "/api/(.*)",
-      "dest": "/dist/server/node-build.mjs"
+      "source": "/api/(.*)",
+      "destination": "/api/index.ts"
     },
     {
-      "src": "/(.*)",
-      "dest": "/dist/spa/$1"
+      "source": "/(.*)",
+      "destination": "/index.html"
     }
   ],
   "env": {
-    "NODE_ENV": "production"
+    "NODE_ENV": "production",
+    "JWT_EXPIRES_IN": "7d"
   }
 }
