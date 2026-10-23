@@ -179,7 +179,7 @@ describe('Security Audit Acceptance Tests (SP-01 to SP-14)', () => {
     });
   });
 
-  describe('SP-09: Security headers presence', () => {
+  describe('SP-09: Security headers and CORS configuration', () => {
     it('includes required defense-in-depth security headers', async () => {
       const res = await fetch(`${baseUrl}/api/ping`);
 
@@ -188,7 +188,34 @@ describe('Security Audit Acceptance Tests (SP-01 to SP-14)', () => {
       expect(res.headers.get('referrer-policy')).toBe('strict-origin-when-cross-origin');
       expect(res.headers.get('content-security-policy')).toBeDefined();
     });
+
+    it('allows requests from Vercel deployment origins without crashing', async () => {
+      const res = await fetch(`${baseUrl}/api/ping`, {
+        headers: { 'Origin': 'https://securepass.vercel.app' },
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get('access-control-allow-origin')).toBe('https://securepass.vercel.app');
+    });
+
+    it('processes password analysis from Vercel deployment origins successfully', async () => {
+      const res = await fetch(`${baseUrl}/api/password-analysis`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Origin': 'https://my-preview.vercel.app',
+        },
+        body: JSON.stringify({ password: 'TestSecurePass2026!' }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get('access-control-allow-origin')).toBe('https://my-preview.vercel.app');
+      const data: any = await res.json();
+      expect(data.score).toBeGreaterThan(0);
+      expect(data.strength).toBeDefined();
+    });
   });
+
 
   describe('SP-11: Input validation schemas', () => {
     it('validates registration input with Zod', () => {

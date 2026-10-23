@@ -43,32 +43,52 @@ export function createServer() {
   });
 
   // SP-09: Configured CORS with explicit origin allowlist
-  const configuredOrigins = process.env.CORS_ORIGIN
+  const rawOrigins = process.env.CORS_ORIGIN
     ? process.env.CORS_ORIGIN.split(',').map((o) => o.trim())
-    : [
-        'http://localhost:8080',
-        'http://localhost:5173',
-        'http://127.0.0.1:8080',
-        'http://127.0.0.1:5173',
-      ];
+    : [];
+
+  const defaultAllowedOrigins = [
+    'http://localhost:8080',
+    'http://localhost:5173',
+    'http://127.0.0.1:8080',
+    'http://127.0.0.1:5173',
+  ];
+
+  if (process.env.VERCEL_URL) {
+    defaultAllowedOrigins.push(`https://${process.env.VERCEL_URL}`);
+  }
+  if (process.env.VERCEL_PROJECT_PRODUCTION_URL) {
+    defaultAllowedOrigins.push(`https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`);
+  }
+
+  const allowedOrigins = new Set([...defaultAllowedOrigins, ...rawOrigins]);
+
+  function isOriginAllowed(origin: string): boolean {
+    if (!origin) return true;
+    if (process.env.NODE_ENV !== 'production') return true;
+    if (allowedOrigins.has(origin) || allowedOrigins.has('*')) return true;
+
+    try {
+      const parsed = new URL(origin);
+      // Allow localhost or 127.0.0.1 on any port
+      if (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') return true;
+      // Allow any Vercel or Netlify preview/production deployment domain
+      if (parsed.hostname.endsWith('.vercel.app') || parsed.hostname.endsWith('.netlify.app')) return true;
+    } catch {
+      return false;
+    }
+
+    return false;
+  }
 
   app.use(
     cors({
       origin: (origin, callback) => {
-        // Allow requests with no origin (e.g. mobile apps, curl, same-origin)
-        if (!origin) return callback(null, true);
-
-        // Check if origin matches configured allowed origins
-        const isAllowed = configuredOrigins.some((allowed) => {
-          if (allowed === '*' && process.env.NODE_ENV !== 'production') return true;
-          return origin === allowed || allowed.endsWith(origin);
-        });
-
-        if (isAllowed || process.env.NODE_ENV !== 'production') {
+        if (!origin || isOriginAllowed(origin)) {
           return callback(null, true);
         }
-
-        return callback(new Error('CORS policy: Not allowed by CORS configuration'));
+        // Non-crashing CORS rejection: do not return Error (which crashes with 500)
+        return callback(null, false);
       },
       methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'Authorization'],
@@ -105,6 +125,12 @@ export function createServer() {
   app.patch('/api/admin/users/:userId/status', authenticateToken, requireAdmin, handleUpdateUserStatus);
   app.delete('/api/admin/users/:userId', authenticateToken, requireAdmin, handleDeleteUser);
   app.get('/api/admin/audit-logs', authenticateToken, requireAdmin, handleGetAuditLogs);
+
+  // Global error handler to ensure clean JSON responses
+  app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error('Unhandled server error:', err);
+    res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+  });
 
   return app;
 }
