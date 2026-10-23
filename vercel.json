@@ -16,6 +16,7 @@
   ],
   "env": {
     "NODE_ENV": "production",
-    "JWT_EXPIRES_IN": "1h"
+    "JWT_EXPIRES_IN": "1h",
+    "JWT_SECRET": "d3b07384d113edec49eaa6238ad5ff00f823ec3b93f0b2f5b66d488ab897fa26"
   }
 }

@@ -233,7 +233,32 @@ describe('Security Audit Acceptance Tests (SP-01 to SP-14)', () => {
       });
       expect(oversized.success).toBe(false); // Max 72 chars
     });
+
+    it('successfully registers user with valid complex password', async () => {
+      const testEmail = `register-test-${Date.now()}@gmail.com`;
+      const testPassword = '|K04RVybR#Zwl$w_E,';
+
+      const res = await fetch(`${baseUrl}/api/auth/register`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Origin': 'https://securepass.vercel.app',
+        },
+        body: JSON.stringify({
+          email: testEmail,
+          password: testPassword,
+          confirmPassword: testPassword,
+        }),
+      });
+
+      expect(res.status).toBe(201);
+      const data: any = await res.json();
+      expect(data.success).toBe(true);
+      expect(data.token).toBeDefined();
+      expect(data.user.email).toBe(testEmail);
+    });
   });
+
 
   describe('SP-13: Admin audit logging and last admin safeguard', () => {
     it('prevents deactivating or deleting the last active admin', async () => {

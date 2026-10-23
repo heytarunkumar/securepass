@@ -66,20 +66,29 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         body: JSON.stringify({ email, password }),
       });
 
-      const data: AuthResponse = await response.json();
+      let data: any = null;
+      try {
+        data = await response.json();
+      } catch {
+        const text = await response.text().catch(() => '');
+        return {
+          success: false,
+          message: text || `Authentication failed (Server status: ${response.status})`,
+        };
+      }
 
-      if (data.success && data.token && data.user) {
+      if (data && (data.success || response.ok) && data.token && data.user) {
         setToken(data.token);
         setUser(data.user);
         localStorage.setItem('auth_token', data.token);
         localStorage.setItem('auth_user', JSON.stringify(data.user));
-        return { success: true, message: data.message };
+        return { success: true, message: data.message || 'Login successful' };
       } else {
-        return { success: false, message: data.message };
+        return { success: false, message: data?.message || data?.error || 'Invalid credentials' };
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Login error:', error);
-      return { success: false, message: 'Network error. Please try again.' };
+      return { success: false, message: error?.message || 'Network error. Please try again.' };
     } finally {
       setIsLoading(false);
     }
@@ -96,24 +105,34 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         body: JSON.stringify({ email, password, confirmPassword }),
       });
 
-      const data: AuthResponse = await response.json();
+      let data: any = null;
+      try {
+        data = await response.json();
+      } catch {
+        const text = await response.text().catch(() => '');
+        return {
+          success: false,
+          message: text || `Registration failed (Server status: ${response.status})`,
+        };
+      }
 
-      if (data.success && data.token && data.user) {
+      if (data && (data.success || response.ok) && data.token && data.user) {
         setToken(data.token);
         setUser(data.user);
         localStorage.setItem('auth_token', data.token);
         localStorage.setItem('auth_user', JSON.stringify(data.user));
-        return { success: true, message: data.message };
+        return { success: true, message: data.message || 'Account created successfully' };
       } else {
-        return { success: false, message: data.message };
+        return { success: false, message: data?.message || data?.error || 'Registration failed' };
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Registration error:', error);
-      return { success: false, message: 'Network error. Please try again.' };
+      return { success: false, message: error?.message || 'Network error. Please try again.' };
     } finally {
       setIsLoading(false);
     }
   };
+
 
   const logout = () => {
     const currentToken = token;
