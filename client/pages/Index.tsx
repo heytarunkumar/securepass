@@ -293,22 +293,43 @@ export default function Index() {
                               </div>
                             </div>
 
-                            {/* Breach Alert */}
-                            {analysis.isBreached && (
+                            {/* Breach Status Banner (SP-04: Tri-state reporting) */}
+                            {analysis.breachStatus === 'breached' && (
                               <motion.div
-                                initial={{ scale: 0.9, opacity: 0 }}
+                                initial={{ scale: 0.95, opacity: 0 }}
                                 animate={{ scale: 1, opacity: 1 }}
                               >
-                                <Alert variant="destructive" className="border-red-500/50 bg-red-500/5 overflow-hidden relative">
+                                <Alert variant="destructive" className="border-red-500/50 bg-red-500/10 overflow-hidden relative">
                                   <div className="absolute top-0 right-0 p-4 opacity-10">
                                     <AlertTriangle className="h-24 w-24" />
                                   </div>
-                                  <AlertDescription className="relative z-10 font-bold">
+                                  <AlertDescription className="relative z-10 font-bold text-red-600 dark:text-red-400">
                                     CRITICAL LEAK: This password was exposed in {analysis.breachCount?.toLocaleString()} identified data breaches. 
                                     Do not use this for critical accounts.
                                   </AlertDescription>
                                 </Alert>
                               </motion.div>
+                            )}
+
+                            {analysis.breachStatus === 'unavailable' && (
+                              <motion.div
+                                initial={{ scale: 0.95, opacity: 0 }}
+                                animate={{ scale: 1, opacity: 1 }}
+                              >
+                                <Alert className="border-amber-500/30 bg-amber-500/5 text-amber-700 dark:text-amber-300">
+                                  <AlertCircle className="h-4 w-4 text-amber-500" />
+                                  <AlertDescription className="font-semibold text-xs">
+                                    Breach Intelligence Offline: Have I Been Pwned check could not be completed. Resilience is evaluated using offline heuristics only.
+                                  </AlertDescription>
+                                </Alert>
+                              </motion.div>
+                            )}
+
+                            {analysis.breachStatus === 'clean' && password.length > 0 && (
+                              <div className="flex items-center gap-2 p-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5 text-emerald-600 text-xs font-bold">
+                                <CheckCircle className="h-4 w-4 flex-shrink-0" />
+                                <span>Zero Leaks Detected: Not found in the 800M+ pwned passwords database</span>
+                              </div>
                             )}
 
                             {/* Checklist */}
@@ -356,8 +377,8 @@ export default function Index() {
                   <CardTitle className="text-4xl font-black">
                     {analysis?.crackTime || 'Instantly'}
                   </CardTitle>
-                  <CardDescription className="font-medium">
-                    Estimated duration for a modern GPU farm to compromise this credential.
+                  <CardDescription className="font-medium text-xs">
+                    {analysis?.timeToCrack?.scenario || 'Estimated duration for a modern GPU farm to compromise this credential.'}
                   </CardDescription>
                 </CardHeader>
               </Card>

@@ -19,6 +19,7 @@
     "build:server": "vite build --config vite.config.server.ts",
     "start": "node dist/server/node-build.mjs",
     "test": "vitest --run",
+    "bootstrap:admin": "tsx server/bootstrap-admin.ts",
     "format.fix": "prettier --write .",
     "typecheck": "tsc",
     "deploy:vercel": "vercel --prod",

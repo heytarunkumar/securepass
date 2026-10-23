@@ -2,6 +2,8 @@ export interface DemoResponse {
   message: string;
 }
 
+export type BreachStatus = 'breached' | 'clean' | 'unavailable';
+
 export interface PasswordAnalysisRequest {
   password: string;
 }
@@ -16,6 +18,7 @@ export interface PasswordAnalysisResponse {
   timeToCrack: {
     seconds: number;
     display: string;
+    scenario?: string;
   };
   checks: {
     hasLength: boolean;
@@ -26,6 +29,7 @@ export interface PasswordAnalysisResponse {
     isCommon: boolean;
   };
   isBreached?: boolean;
+  breachStatus?: BreachStatus;
   breachCount?: number;
 }
 
@@ -53,18 +57,20 @@ export interface AuthResponse {
 
 export interface PasswordHistoryItem {
   id: string;
-  password: string; // This would be hashed in real implementation
   strength: string;
   score: number;
+  entropy: number;
   createdAt: string;
   isBreached: boolean;
+  breachCount: number;
 }
 
 export interface UserProfile {
   id: string;
   email: string;
+  role: 'user' | 'admin';
   createdAt: string;
-  lastLogin: string;
+  lastLogin: string | null;
   passwordHistory: PasswordHistoryItem[];
   twoFactorEnabled: boolean;
 }
@@ -83,3 +89,16 @@ export interface AdminStats {
     'Very Strong': number;
   };
 }
+
+export interface AdminAuditLog {
+  id: string;
+  adminId: string;
+  adminEmail: string;
+  action: string;
+  targetType: string;
+  targetId: string | null;
+  details: string | null;
+  ipAddress: string | null;
+  createdAt: string;
+}
+

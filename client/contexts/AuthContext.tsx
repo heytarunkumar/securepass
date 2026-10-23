@@ -116,17 +116,18 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   };
 
   const logout = () => {
+    const currentToken = token;
     setUser(null);
     setToken(null);
     localStorage.removeItem('auth_token');
     localStorage.removeItem('auth_user');
     
-    // Call logout endpoint
-    if (token) {
+    // Call server-side logout endpoint to revoke session immediately (SP-05)
+    if (currentToken) {
       fetch('/api/auth/logout', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
+          'Authorization': `Bearer ${currentToken}`,
         },
       }).catch(console.error);
     }

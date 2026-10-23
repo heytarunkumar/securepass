@@ -1,20 +1,26 @@
 import Database from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
 import bcrypt from 'bcryptjs';
-
 import { join } from 'path';
-import { existsSync, mkdirSync } from 'fs';
 
-// Database connection
+// Database connection & ephemeral serverless warnings
 const isVercel = process.env.VERCEL === '1';
-const dbPath = isVercel ? join('/tmp', 'securepass.db') : 'securepass.db';
+const dbPath = isVercel ? join('/tmp', 'securepass.db') : (process.env.DATABASE_PATH || 'securepass.db');
+
+if (isVercel && process.env.NODE_ENV === 'production') {
+  console.warn(
+    '⚠️ [ARCHITECTURE WARNING (SP-06)]: Running SQLite database on Vercel ephemeral /tmp storage. ' +
+    'Data will not persist across lambda invocations or deployments. ' +
+    'Deploy to a persistent host (e.g. Railway, Render, VPS) or configure a managed database for production durability.'
+  );
+}
 
 const db = new Database(dbPath);
 
 // Enable foreign keys
 db.pragma('foreign_keys = ON');
 
-// Create tables
+// Create tables with security hardening
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
@@ -27,10 +33,20 @@ db.exec(`
     is_active INTEGER DEFAULT 1
   );
 
+  CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at DATETIME NOT NULL,
+    is_revoked INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
   CREATE TABLE IF NOT EXISTS password_history (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
-    password_hash TEXT NOT NULL,
+    password_hash TEXT,
     strength_score INTEGER NOT NULL,
     strength_level TEXT NOT NULL,
     entropy REAL NOT NULL,
@@ -43,7 +59,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS password_checks (
     id TEXT PRIMARY KEY,
     user_id TEXT,
-    password_hash TEXT NOT NULL,
+    password_hash TEXT,
     strength_score INTEGER NOT NULL,
     strength_level TEXT NOT NULL,
     entropy REAL NOT NULL,
@@ -68,44 +84,111 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS breach_alerts (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
-    password_hash TEXT NOT NULL,
     breach_count INTEGER NOT NULL,
     notified INTEGER DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   );
+
+  CREATE TABLE IF NOT EXISTS admin_audit_logs (
+    id TEXT PRIMARY KEY,
+    admin_id TEXT NOT NULL,
+    admin_email TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    target_id TEXT,
+    details TEXT,
+    ip_address TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
-// Create default admin user if doesn't exist
-const checkAdmin = db.prepare('SELECT id FROM users WHERE email = ? AND role = ?');
-const adminExists = checkAdmin.get('admin@securepass.com', 'admin');
+// Migration helper: If existing tables had NOT NULL password_hash, migrate them safely
+try {
+  const tableInfoHistory = db.pragma('table_info(password_history)') as Array<{ name: string; notnull: number }>;
+  const hashColHistory = tableInfoHistory.find(col => col.name === 'password_hash');
+  if (hashColHistory && hashColHistory.notnull === 1) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS password_history_new (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        password_hash TEXT,
+        strength_score INTEGER NOT NULL,
+        strength_level TEXT NOT NULL,
+        entropy REAL NOT NULL,
+        is_breached INTEGER DEFAULT 0,
+        breach_count INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+      INSERT INTO password_history_new SELECT id, user_id, NULL, strength_score, strength_level, entropy, is_breached, breach_count, created_at FROM password_history;
+      DROP TABLE password_history;
+      ALTER TABLE password_history_new RENAME TO password_history;
+    `);
+  }
 
-if (!adminExists) {
-  const adminPassword = 'SecurePass2024!';
-  const hashedPassword = bcrypt.hashSync(adminPassword, 12);
-  const insertAdmin = db.prepare(`
-    INSERT INTO users (id, email, password_hash, role, created_at)
-    VALUES (?, ?, ?, ?, ?)
+  const tableInfoChecks = db.pragma('table_info(password_checks)') as Array<{ name: string; notnull: number }>;
+  const hashColChecks = tableInfoChecks.find(col => col.name === 'password_hash');
+  if (hashColChecks && hashColChecks.notnull === 1) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS password_checks_new (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        password_hash TEXT,
+        strength_score INTEGER NOT NULL,
+        strength_level TEXT NOT NULL,
+        entropy REAL NOT NULL,
+        is_breached INTEGER DEFAULT 0,
+        breach_count INTEGER DEFAULT 0,
+        ip_address TEXT,
+        user_agent TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+      );
+      INSERT INTO password_checks_new SELECT id, user_id, NULL, strength_score, strength_level, entropy, is_breached, breach_count, ip_address, user_agent, created_at FROM password_checks;
+      DROP TABLE password_checks;
+      ALTER TABLE password_checks_new RENAME TO password_checks;
+    `);
+  }
+} catch (e) {
+  // Migration fallback
+}
+
+// SP-02: Purge any legacy unsalted digests from existing records
+try {
+  db.exec(`
+    UPDATE password_history SET password_hash = NULL WHERE password_hash IS NOT NULL;
+    UPDATE password_checks SET password_hash = NULL WHERE password_hash IS NOT NULL;
   `);
-  
-  insertAdmin.run(uuidv4(), 'admin@securepass.com', hashedPassword, 'admin', new Date().toISOString());
-  console.log('✅ Default admin created: admin@securepass.com / SecurePass2024!');
+} catch (e) {
+  // Ignore
+}
+
+// SP-01: Remove vulnerable legacy hardcoded default admin account if present
+try {
+  const legacyAdmin = db.prepare("SELECT id, password_hash FROM users WHERE email = 'admin@securepass.com'").get() as { id: string; password_hash: string } | undefined;
+  if (legacyAdmin && bcrypt.compareSync('SecurePass2024!', legacyAdmin.password_hash)) {
+    db.prepare('DELETE FROM users WHERE id = ?').run(legacyAdmin.id);
+    console.warn('⚠️ [SECURITY REMEDIATION (SP-01)]: Purged vulnerable default admin account. Use bootstrap-admin command with a secure secret.');
+  }
+} catch (e) {
+  // Ignore
 }
 
 // User database operations
 export const userDb = {
   // Create user
-  create: (email: string, password: string, role: 'user' | 'admin' = 'user') => {
+  create: (email: string, passwordHash: string, role: 'user' | 'admin' = 'user') => {
     const id = uuidv4();
-    const hashedPassword = bcrypt.hashSync(password, 12);
+    const createdAt = new Date().toISOString();
     const stmt = db.prepare(`
       INSERT INTO users (id, email, password_hash, role, created_at)
       VALUES (?, ?, ?, ?, ?)
     `);
-    
+
     try {
-      stmt.run(id, email, hashedPassword, role, new Date().toISOString());
-      return { id, email, role, created_at: new Date().toISOString() };
+      stmt.run(id, email.toLowerCase().trim(), passwordHash, role, createdAt);
+      return { id, email: email.toLowerCase().trim(), role, created_at: createdAt };
     } catch (error: any) {
       if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
         throw new Error('Email already exists');
@@ -114,15 +197,27 @@ export const userDb = {
     }
   },
 
-  // Find user by email
+  // Find user by email (active only)
   findByEmail: (email: string) => {
     const stmt = db.prepare('SELECT * FROM users WHERE email = ? AND is_active = 1');
-    return stmt.get(email) as any;
+    return stmt.get(email.toLowerCase().trim()) as any;
   },
 
-  // Find user by ID
+  // Find user by email regardless of active status (for registration check)
+  findAnyByEmail: (email: string) => {
+    const stmt = db.prepare('SELECT * FROM users WHERE email = ?');
+    return stmt.get(email.toLowerCase().trim()) as any;
+  },
+
+  // Find user by ID (active only)
   findById: (id: string) => {
     const stmt = db.prepare('SELECT * FROM users WHERE id = ? AND is_active = 1');
+    return stmt.get(id) as any;
+  },
+
+  // Find user by ID regardless of status
+  findAnyById: (id: string) => {
+    const stmt = db.prepare('SELECT * FROM users WHERE id = ?');
     return stmt.get(id) as any;
   },
 
@@ -158,91 +253,125 @@ export const userDb = {
   getCount: () => {
     const stmt = db.prepare('SELECT COUNT(*) as count FROM users WHERE is_active = 1');
     return stmt.get() as { count: number };
-  }
-};
-
-// Password history operations
-export const passwordHistoryDb = {
-  // Add password to history
-  add: (userId: string, passwordHash: string, analysis: any) => {
-    const id = uuidv4();
-    const stmt = db.prepare(`
-      INSERT INTO password_history (id, user_id, password_hash, strength_score, strength_level, entropy, is_breached, breach_count, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    
-    stmt.run(
-      id, 
-      userId, 
-      passwordHash, 
-      analysis.score, 
-      analysis.strength, 
-      analysis.entropy,
-      analysis.isBreached ? 1 : 0,
-      analysis.breachCount || 0,
-      new Date().toISOString()
-    );
-    return id;
   },
 
-  // Get user's password history
-  getByUser: (userId: string) => {
-    const stmt = db.prepare(`
-      SELECT * FROM password_history 
-      WHERE user_id = ? 
-      ORDER BY created_at DESC 
-      LIMIT 10
-    `);
-    return stmt.all(userId);
+  // Count active administrators (SP-13: safeguard against deactivating last admin)
+  countActiveAdmins: () => {
+    const stmt = db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'admin' AND is_active = 1");
+    const result = stmt.get() as { count: number };
+    return result.count;
   }
 };
 
-// Password checks operations
-export const passwordCheckDb = {
-  // Log password check
-  log: (userId: string | null, passwordHash: string, analysis: any, ipAddress?: string, userAgent?: string) => {
+// Session management operations (SP-05: server-side token revocation & session management)
+export const sessionDb = {
+  create: (sessionId: string, userId: string, tokenHash: string, expiresAt: Date) => {
+    const stmt = db.prepare(`
+      INSERT INTO sessions (id, user_id, token_hash, expires_at, is_revoked, created_at)
+      VALUES (?, ?, ?, ?, 0, ?)
+    `);
+    stmt.run(sessionId, userId, tokenHash, expiresAt.toISOString(), new Date().toISOString());
+  },
+
+  isValid: (sessionId: string, userId: string, tokenHash: string): boolean => {
+    const stmt = db.prepare(`
+      SELECT id FROM sessions
+      WHERE id = ? AND user_id = ? AND token_hash = ? AND is_revoked = 0 AND expires_at > ?
+    `);
+    const session = stmt.get(sessionId, userId, tokenHash, new Date().toISOString());
+    return !!session;
+  },
+
+  revoke: (sessionId: string) => {
+    const stmt = db.prepare('UPDATE sessions SET is_revoked = 1 WHERE id = ?');
+    stmt.run(sessionId);
+  },
+
+  revokeAllForUser: (userId: string) => {
+    const stmt = db.prepare('UPDATE sessions SET is_revoked = 1 WHERE user_id = ?');
+    stmt.run(userId);
+  },
+
+  cleanupExpired: () => {
+    const stmt = db.prepare('DELETE FROM sessions WHERE expires_at < ? OR is_revoked = 1');
+    stmt.run(new Date().toISOString());
+  }
+};
+
+// Password history operations (SP-02: Never stores passwords or password hashes)
+export const passwordHistoryDb = {
+  add: (userId: string, analysis: any) => {
     const id = uuidv4();
     const stmt = db.prepare(`
-      INSERT INTO password_checks (id, user_id, password_hash, strength_score, strength_level, entropy, is_breached, breach_count, ip_address, user_agent, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO password_history (id, user_id, strength_score, strength_level, entropy, is_breached, breach_count, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    
+
     stmt.run(
       id,
       userId,
-      passwordHash,
       analysis.score,
       analysis.strength,
       analysis.entropy,
       analysis.isBreached ? 1 : 0,
       analysis.breachCount || 0,
-      ipAddress,
-      userAgent,
       new Date().toISOString()
     );
     return id;
   },
 
-  // Get total checks count
+  getByUser: (userId: string) => {
+    const stmt = db.prepare(`
+      SELECT id, user_id, strength_score, strength_level, entropy, is_breached, breach_count, created_at 
+      FROM password_history 
+      WHERE user_id = ? 
+      ORDER BY created_at DESC 
+      LIMIT 10
+    `);
+    return stmt.all(userId) as any[];
+  }
+};
+
+// Password checks operations (SP-02 & SP-08: Metadata-only analytics, bounded storage)
+export const passwordCheckDb = {
+  log: (userId: string | null, analysis: any, ipAddress?: string, userAgent?: string) => {
+    const id = uuidv4();
+    const stmt = db.prepare(`
+      INSERT INTO password_checks (id, user_id, strength_score, strength_level, entropy, is_breached, breach_count, ip_address, user_agent, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    stmt.run(
+      id,
+      userId,
+      analysis.score,
+      analysis.strength,
+      analysis.entropy,
+      analysis.isBreached ? 1 : 0,
+      analysis.breachCount || 0,
+      ipAddress || null,
+      userAgent || null,
+      new Date().toISOString()
+    );
+    return id;
+  },
+
   getCount: () => {
     const stmt = db.prepare('SELECT COUNT(*) as count FROM password_checks');
     return stmt.get() as { count: number };
   },
 
-  // Get breached passwords count
   getBreachedCount: () => {
     const stmt = db.prepare('SELECT COUNT(*) as count FROM password_checks WHERE is_breached = 1');
     return stmt.get() as { count: number };
   },
 
-  // Get average strength
   getAverageStrength: () => {
     const stmt = db.prepare('SELECT AVG(strength_score) as average FROM password_checks');
     const result = stmt.get() as { average: number };
     return Math.round(result.average || 0);
   },
 
-  // Get strength distribution
   getStrengthDistribution: () => {
     const stmt = db.prepare(`
       SELECT strength_level, COUNT(*) as count 
@@ -253,28 +382,69 @@ export const passwordCheckDb = {
   }
 };
 
-// Login attempts operations
+// Login attempts operations (SP-07: IP-aware and account-aware throttling)
 export const loginAttemptsDb = {
-  // Log login attempt
   log: (email: string, success: boolean, ipAddress?: string, userAgent?: string, failureReason?: string) => {
     const id = uuidv4();
     const stmt = db.prepare(`
       INSERT INTO login_attempts (id, email, success, ip_address, user_agent, failure_reason, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
-    
-    stmt.run(id, email, success ? 1 : 0, ipAddress, userAgent, failureReason, new Date().toISOString());
+
+    stmt.run(id, email.toLowerCase().trim(), success ? 1 : 0, ipAddress || null, userAgent || null, failureReason || null, new Date().toISOString());
   },
 
-  // Get recent failed attempts for an email
-  getRecentFailedAttempts: (email: string, minutes: number = 15) => {
+  getRecentFailedAttemptsByEmail: (email: string, minutes: number = 15) => {
     const since = new Date(Date.now() - minutes * 60 * 1000).toISOString();
     const stmt = db.prepare(`
       SELECT COUNT(*) as count 
       FROM login_attempts 
       WHERE email = ? AND success = 0 AND created_at > ?
     `);
-    return stmt.get(email, since) as { count: number };
+    return stmt.get(email.toLowerCase().trim(), since) as { count: number };
+  },
+
+  getRecentFailedAttemptsByIp: (ipAddress: string, minutes: number = 15) => {
+    const since = new Date(Date.now() - minutes * 60 * 1000).toISOString();
+    const stmt = db.prepare(`
+      SELECT COUNT(*) as count 
+      FROM login_attempts 
+      WHERE ip_address = ? AND success = 0 AND created_at > ?
+    `);
+    return stmt.get(ipAddress, since) as { count: number };
+  },
+
+  getRecentFailedAttemptsByIpAndEmail: (ipAddress: string, email: string, minutes: number = 15) => {
+    const since = new Date(Date.now() - minutes * 60 * 1000).toISOString();
+    const stmt = db.prepare(`
+      SELECT COUNT(*) as count 
+      FROM login_attempts 
+      WHERE ip_address = ? AND email = ? AND success = 0 AND created_at > ?
+    `);
+    return stmt.get(ipAddress, email.toLowerCase().trim(), since) as { count: number };
+  }
+};
+
+// Admin audit log operations (SP-13: Comprehensive append-only audit trail)
+export const adminAuditDb = {
+  log: (adminId: string, adminEmail: string, action: string, targetType: string, targetId: string | null, details: string | null, ipAddress: string | null) => {
+    const id = uuidv4();
+    const stmt = db.prepare(`
+      INSERT INTO admin_audit_logs (id, admin_id, admin_email, action, target_type, target_id, details, ip_address, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(id, adminId, adminEmail, action, targetType, targetId, details, ipAddress, new Date().toISOString());
+    return id;
+  },
+
+  getAll: (limit: number = 50, offset: number = 0) => {
+    const stmt = db.prepare(`
+      SELECT id, admin_id as adminId, admin_email as adminEmail, action, target_type as targetType, target_id as targetId, details, ip_address as ipAddress, created_at as createdAt
+      FROM admin_audit_logs
+      ORDER BY created_at DESC
+      LIMIT ? OFFSET ?
+    `);
+    return stmt.all(limit, offset) as any[];
   }
 };
 

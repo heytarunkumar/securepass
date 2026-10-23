@@ -1,22 +1,22 @@
-import { RequestHandler } from "express";
-import { 
-  userDb, 
-  passwordCheckDb, 
-  loginAttemptsDb,
-  passwordHistoryDb 
-} from "../database";
-import { AuthRequest } from "../auth";
-import { AdminStats } from "@shared/api";
+import { RequestHandler } from 'express';
+import {
+  userDb,
+  passwordCheckDb,
+  passwordHistoryDb,
+  adminAuditDb,
+  sessionDb
+} from '../database';
+import { AuthRequest } from '../auth';
+import { AdminStats } from '@shared/api';
 
 // Get admin dashboard statistics
-export const handleAdminStats: RequestHandler = async (req: AuthRequest, res) => {
+export const handleAdminStats: RequestHandler = async (_req: AuthRequest, res) => {
   try {
     const totalUsers = userDb.getCount();
     const totalPasswordsChecked = passwordCheckDb.getCount();
     const breachedPasswordsFound = passwordCheckDb.getBreachedCount();
     const averagePasswordStrength = passwordCheckDb.getAverageStrength();
-    
-    // Get strength distribution
+
     const strengthDistribution = passwordCheckDb.getStrengthDistribution();
     const distributionMap: AdminStats['strengthDistribution'] = {
       'Very Weak': 0,
@@ -24,7 +24,7 @@ export const handleAdminStats: RequestHandler = async (req: AuthRequest, res) =>
       'Fair': 0,
       'Good': 0,
       'Strong': 0,
-      'Very Strong': 0
+      'Very Strong': 0,
     };
 
     strengthDistribution.forEach((item: any) => {
@@ -38,27 +38,27 @@ export const handleAdminStats: RequestHandler = async (req: AuthRequest, res) =>
       totalPasswordsChecked: totalPasswordsChecked.count,
       breachedPasswordsFound: breachedPasswordsFound.count,
       averagePasswordStrength,
-      strengthDistribution: distributionMap
+      strengthDistribution: distributionMap,
     };
 
     res.json({
       success: true,
-      stats
+      stats,
     });
   } catch (error) {
     console.error('Admin stats error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to fetch admin statistics'
+      message: 'Failed to fetch admin statistics',
     });
   }
 };
 
-// Get all users
-export const handleGetUsers: RequestHandler = async (req: AuthRequest, res) => {
+// Get all users (SP-12: Accurate MFA status)
+export const handleGetUsers: RequestHandler = async (_req: AuthRequest, res) => {
   try {
     const users = userDb.getAll();
-    
+
     const usersWithStats = users.map((user: any) => {
       const passwordHistory = passwordHistoryDb.getByUser(user.id);
       return {
@@ -68,26 +68,26 @@ export const handleGetUsers: RequestHandler = async (req: AuthRequest, res) => {
         createdAt: user.created_at,
         lastLogin: user.last_login,
         isActive: user.is_active === 1,
-        twoFactorEnabled: user.two_factor_enabled === 1,
+        twoFactorEnabled: false, // SP-12: Accurately reflected until verified enrollment
         passwordCount: passwordHistory.length,
-        lastPasswordCheck: passwordHistory[0]?.created_at || null
+        lastPasswordCheck: passwordHistory[0]?.created_at || null,
       };
     });
 
     res.json({
       success: true,
-      users: usersWithStats
+      users: usersWithStats,
     });
   } catch (error) {
     console.error('Get users error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to fetch users'
+      message: 'Failed to fetch users',
     });
   }
 };
 
-// Update user status (activate/deactivate)
+// Update user status (SP-13: Audited mutation + safeguard against disabling last admin)
 export const handleUpdateUserStatus: RequestHandler = async (req: AuthRequest, res) => {
   try {
     const { userId } = req.params;
@@ -96,7 +96,7 @@ export const handleUpdateUserStatus: RequestHandler = async (req: AuthRequest, r
     if (typeof isActive !== 'boolean') {
       return res.status(400).json({
         success: false,
-        message: 'isActive must be a boolean value'
+        message: 'isActive must be a boolean value',
       });
     }
 
@@ -104,34 +104,61 @@ export const handleUpdateUserStatus: RequestHandler = async (req: AuthRequest, r
     if (userId === req.user?.id && !isActive) {
       return res.status(400).json({
         success: false,
-        message: 'You cannot deactivate your own account'
+        message: 'You cannot deactivate your own administrative account',
       });
     }
 
-    const user = userDb.findById(userId);
-    if (!user) {
+    const targetUser = userDb.findAnyById(userId);
+    if (!targetUser) {
       return res.status(404).json({
         success: false,
-        message: 'User not found'
+        message: 'User not found',
       });
+    }
+
+    // SP-13: Guard against deactivating the last remaining active administrator
+    if (!isActive && targetUser.role === 'admin') {
+      const activeAdminCount = userDb.countActiveAdmins();
+      if (activeAdminCount <= 1) {
+        return res.status(400).json({
+          success: false,
+          message: 'Operation rejected: Cannot deactivate the last remaining active administrator',
+        });
+      }
     }
 
     userDb.updateStatus(userId, isActive);
 
+    // SP-05: If deactivated, revoke all existing sessions immediately
+    if (!isActive) {
+      sessionDb.revokeAllForUser(userId);
+    }
+
+    // SP-13: Audit log the status update
+    adminAuditDb.log(
+      req.user!.id,
+      req.user!.email,
+      isActive ? 'USER_ACTIVATE' : 'USER_DEACTIVATE',
+      'user',
+      userId,
+      JSON.stringify({ previousStatus: targetUser.is_active === 1, newStatus: isActive, targetEmail: targetUser.email }),
+      req.ip || null
+    );
+
     res.json({
       success: true,
-      message: `User ${isActive ? 'activated' : 'deactivated'} successfully`
+      message: `User ${isActive ? 'activated' : 'deactivated'} successfully`,
     });
   } catch (error) {
     console.error('Update user status error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to update user status'
+      message: 'Failed to update user status',
     });
   }
 };
 
-// Delete user
+// Delete user (SP-13: Audited mutation + safeguard against deleting last admin)
 export const handleDeleteUser: RequestHandler = async (req: AuthRequest, res) => {
   try {
     const { userId } = req.params;
@@ -140,29 +167,53 @@ export const handleDeleteUser: RequestHandler = async (req: AuthRequest, res) =>
     if (userId === req.user?.id) {
       return res.status(400).json({
         success: false,
-        message: 'You cannot delete your own account'
+        message: 'You cannot delete your own administrative account',
       });
     }
 
-    const user = userDb.findById(userId);
-    if (!user) {
+    const targetUser = userDb.findAnyById(userId);
+    if (!targetUser) {
       return res.status(404).json({
         success: false,
-        message: 'User not found'
+        message: 'User not found',
       });
     }
 
+    // SP-13: Guard against deleting the last remaining active administrator
+    if (targetUser.role === 'admin') {
+      const activeAdminCount = userDb.countActiveAdmins();
+      if (activeAdminCount <= 1) {
+        return res.status(400).json({
+          success: false,
+          message: 'Operation rejected: Cannot delete the last remaining active administrator',
+        });
+      }
+    }
+
+    // Revoke all sessions
+    sessionDb.revokeAllForUser(userId);
     userDb.delete(userId);
+
+    // SP-13: Audit log deletion
+    adminAuditDb.log(
+      req.user!.id,
+      req.user!.email,
+      'USER_DELETE',
+      'user',
+      userId,
+      JSON.stringify({ deletedEmail: targetUser.email, deletedRole: targetUser.role }),
+      req.ip || null
+    );
 
     res.json({
       success: true,
-      message: 'User deleted successfully'
+      message: 'User deleted successfully',
     });
   } catch (error) {
     console.error('Delete user error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to delete user'
+      message: 'Failed to delete user',
     });
   }
 };
@@ -172,11 +223,11 @@ export const handleGetUserDetails: RequestHandler = async (req: AuthRequest, res
   try {
     const { userId } = req.params;
 
-    const user = userDb.findById(userId);
+    const user = userDb.findAnyById(userId);
     if (!user) {
       return res.status(404).json({
         success: false,
-        message: 'User not found'
+        message: 'User not found',
       });
     }
 
@@ -191,59 +242,44 @@ export const handleGetUserDetails: RequestHandler = async (req: AuthRequest, res
         createdAt: user.created_at,
         lastLogin: user.last_login,
         isActive: user.is_active === 1,
-        twoFactorEnabled: user.two_factor_enabled === 1,
-        passwordHistory: passwordHistory.map(p => ({
+        twoFactorEnabled: false, // SP-12
+        passwordHistory: passwordHistory.map((p) => ({
           id: p.id,
           strength: p.strength_level,
           score: p.strength_score,
           entropy: p.entropy,
           isBreached: p.is_breached === 1,
           breachCount: p.breach_count,
-          createdAt: p.created_at
-        }))
-      }
+          createdAt: p.created_at,
+        })),
+      },
     });
   } catch (error) {
     console.error('Get user details error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to fetch user details'
+      message: 'Failed to fetch user details',
     });
   }
 };
 
-// Get recent password checks
-export const handleGetRecentChecks: RequestHandler = async (req: AuthRequest, res) => {
+// Get admin audit logs (SP-13: Operator visibility into mutations)
+export const handleGetAuditLogs: RequestHandler = async (req: AuthRequest, res) => {
   try {
-    const limit = parseInt(req.query.limit as string) || 50;
-    
-    // This would require a new database query, for now return empty
-    res.json({
-      success: true,
-      checks: []
-    });
-  } catch (error) {
-    console.error('Get recent checks error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to fetch recent checks'
-    });
-  }
-};
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 100);
+    const offset = parseInt(req.query.offset as string, 10) || 0;
 
-// Get breach alerts
-export const handleGetBreachAlerts: RequestHandler = async (req: AuthRequest, res) => {
-  try {
-    // This would require implementing breach alert system
+    const logs = adminAuditDb.getAll(limit, offset);
+
     res.json({
       success: true,
-      alerts: []
+      logs,
     });
   } catch (error) {
-    console.error('Get breach alerts error:', error);
+    console.error('Get audit logs error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to fetch breach alerts'
+      message: 'Failed to fetch audit logs',
     });
   }
 };

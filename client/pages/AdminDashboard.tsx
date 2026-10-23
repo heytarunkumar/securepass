@@ -83,6 +83,7 @@ export default function AdminDashboard() {
 
   const handleUserStatusToggle = async (userId: string, isActive: boolean) => {
     try {
+      setError(null);
       const response = await fetch(`/api/admin/users/${userId}/status`, {
         method: 'PATCH',
         headers: {
@@ -92,13 +93,17 @@ export default function AdminDashboard() {
         body: JSON.stringify({ isActive: !isActive }),
       });
 
+      const data = await response.json();
       if (response.ok) {
         setUsers(users.map(u =>
           u.id === userId ? { ...u, isActive: !isActive } : u
         ));
+      } else {
+        setError(data.message || 'Failed to update user status');
       }
     } catch (error) {
       console.error('Error updating user status:', error);
+      setError('Network error while updating user status');
     }
   };
 
@@ -106,6 +111,7 @@ export default function AdminDashboard() {
     if (!confirm('Are you sure you want to delete this user?')) return;
 
     try {
+      setError(null);
       const response = await fetch(`/api/admin/users/${userId}`, {
         method: 'DELETE',
         headers: {
@@ -113,14 +119,18 @@ export default function AdminDashboard() {
         },
       });
 
+      const data = await response.json();
       if (response.ok) {
         setUsers(users.filter(u => u.id !== userId));
         if (stats) {
           setStats({ ...stats, totalUsers: stats.totalUsers - 1 });
         }
+      } else {
+        setError(data.message || 'Failed to delete user');
       }
     } catch (error) {
       console.error('Error deleting user:', error);
+      setError('Network error while deleting user');
     }
   };
 

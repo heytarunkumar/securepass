@@ -9,24 +9,11 @@ This application is built as a full-stack Node.js application with:
 
 ## Deployment Options
 
-### 🎯 Option 1: Full-Stack Deployment (RECOMMENDED)
+### 🎯 Option 1: Persistent Node.js Deployment (RECOMMENDED FOR SQLITE)
 
-Deploy the entire application as-is to platforms that support Node.js:
+For deployments using SQLite, deploy to platforms with persistent disk volumes so data is not wiped between restarts:
 
-#### Vercel (Recommended)
-```bash
-# 1. Install Vercel CLI
-npm i -g vercel
-
-# 2. Deploy
-vercel
-
-# 3. Set environment variables in Vercel dashboard:
-# JWT_SECRET=your-super-secret-jwt-key-production
-# NODE_ENV=production
-```
-
-#### Railway
+#### Railway (Recommended for Persistent SQLite)
 ```bash
 # 1. Install Railway CLI
 npm install -g @railway/cli
@@ -34,14 +21,40 @@ npm install -g @railway/cli
 # 2. Login and deploy
 railway login
 railway up
+
+# 3. Add volume mount at /app/data and set DATABASE_PATH=/app/data/securepass.db
+# 4. Set required production environment variables:
+# JWT_SECRET=<generate-at-least-32-random-characters>
+# NODE_ENV=production
+# 5. Provision the initial administrator:
+# ADMIN_BOOTSTRAP_EMAIL=admin@yourdomain.com ADMIN_BOOTSTRAP_PASSWORD=<strong-password> npm run bootstrap:admin
 ```
 
-#### Render
-1. Connect your GitHub repository
-2. Create a new Web Service
-3. Set build command: `npm run build`
-4. Set start command: `npm start`
-5. Add environment variables in dashboard
+#### Render / Fly.io / VPS
+1. Connect repository or deploy container.
+2. Set build command: `npm run build`
+3. Set start command: `npm start`
+4. Attach a persistent disk volume to ensure SQLite durability.
+5. Set environment variables (`JWT_SECRET`, `NODE_ENV=production`).
+
+### ⚠️ Option 2: Serverless Platforms (Vercel)
+
+> **Important Architecture Notice (SP-06)**:
+> In serverless environments like Vercel, the local filesystem (`/tmp`) is ephemeral and stateless. Data written to `/tmp/securepass.db` will not persist across cold starts or concurrent lambdas.
+> For production on Vercel, connect to an external managed database (e.g. Neon PostgreSQL, Supabase, PlanetScale).
+
+```bash
+# 1. Install Vercel CLI
+npm i -g vercel
+
+# 2. Set environment variables in Vercel project dashboard:
+# JWT_SECRET=<at-least-32-cryptographic-characters>
+# NODE_ENV=production
+# CORS_ORIGIN=https://your-domain.vercel.app
+
+# 3. Deploy
+vercel --prod
+```
 
 ### 🔄 Option 2: Netlify with Serverless Functions
 
